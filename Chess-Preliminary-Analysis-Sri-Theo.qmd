@@ -1,0 +1,337 @@
+---
+title: "Preliminary Analysis: Chess Game Outcomes"
+author: "Matheo Dwyer and Sriram Soundar"
+date: "2025-04-21"
+format: html
+---
+
+## Introduction
+
+Chess is one of the most deeply studied games in the world, and with the rise of online platforms, we now have access to thousands of matches with rich data on player skill, game structure, and strategy. This gives us a unique opportunity to explore what factors actually influence the outcome of a game.
+
+For this project, we’re asking: **What makes a player more likely to win a chess game?** In particular, we want to understand how player rating (Elo), the type of opening they choose, and game settings like time control affect both the likelihood of winning and how long the game lasts.
+
+Our data comes from a Kaggle dataset of over 20,000 online games. Each row represents a full match, with information like game outcome, player Elo ratings, opening name, number of turns, and the time control used. Here is a link to the dataset: https://www.kaggle.com/datasets/datasnaek/chess 
+
+We expect that players with higher Elo ratings win more, especially when there’s a big skill gap. But we also think that game strategy—like which opening is played—might make a big difference, especially at different skill levels.
+
+## Data Wrangling and Cleaning
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+df <- read.csv("games.csv")
+
+# Creates rating difference and flag if higher-rated player won
+df <- df %>%
+  mutate(rating_diff = abs(white_rating - black_rating),
+         higher_winner = case_when(
+           white_rating > black_rating & winner == "white" ~ "Higher Elo",
+           black_rating > white_rating & winner == "black" ~ "Higher Elo",
+           white_rating > black_rating & winner == "black" ~ "Lower Elo",
+           black_rating > white_rating & winner == "white" ~ "Lower Elo",
+           TRUE ~ NA_character_
+         ))
+```
+
+We created `rating_diff`, `higher_winner`, and will later generate Elo brackets and filter by opening popularity and game type. No rows were removed, but filtering was used for targeted analysis.
+
+## Exploratory Methods
+
+### Win Distribution by Color
+
+```{r}
+# Counts how many wins for each outcome
+outcome_counts <- table(df$winner)
+print(outcome_counts)
+
+# Computes win/draw percentages
+total_decisive_games <- sum(df$winner %in% c("white", "black"))
+white_win_percent <- sum(df$winner == "white") / total_decisive_games * 100
+black_win_percent <- sum(df$winner == "black") / total_decisive_games * 100
+draw_percent <- sum(df$winner == "draw") / nrow(df) * 100
+
+cat(sprintf("White wins %.2f%% of decisive games.\n", white_win_percent))
+cat(sprintf("Black wins %.2f%% of decisive games.\n", black_win_percent))
+cat(sprintf("Draws occur %.2f%% of all games.\n", draw_percent))
+
+# Filters out draws for bar chart
+win_counts <- df %>%
+  filter(winner %in% c("white", "black")) %>%
+  count(winner)
+
+ggplot(win_counts, aes(x = winner, y = n, fill = winner)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Number of Wins by White vs. Black",
+    x = "Winner",
+    y = "Count of Wins"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(
+    values = c("white" = "blanchedalmond", "black" = "black")
+  )
+
+```
+
+### Elo Gap vs Outcome
+
+```{r}
+# Function that counts wins by whether a higher-rated or lower-rated player won
+get_win_counts <- function(threshold) {
+  df %>%
+    filter(rating_diff < threshold, !is.na(higher_winner)) %>% # only rows with known higher_winner
+    count(higher_winner) %>%                                   # count how many wins per group
+    mutate(threshold = paste("<= ", threshold, " Elo Difference")) # label facet
+}
+
+# Combines counts for 3 different Elo thresholds
+win_counts <- bind_rows(
+  get_win_counts(100),
+  get_win_counts(250),
+  get_win_counts(500)
+)
+
+
+ggplot(win_counts, aes(x = higher_winner, y = n, fill = higher_winner)) +
+  geom_bar(stat = "identity", position = "dodge") +             
+  facet_wrap(~ threshold) +                                   # one panel per Elo gap
+  labs(
+    title = "Wins by Higher vs Lower Elo Players",
+    x = "Winner",
+    y = "Count of Wins"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(                                           
+    values = c("Higher Elo" = "darkgreen", "Lower Elo" = "purple")
+  )
+
+```
+
+### Elo Gap vs Game Length
+
+```{r}
+# Plot of Elo Difference vs. Number of Turns
+ggplot(df, aes(x = abs(white_rating - black_rating), y = turns)) +
+  geom_point(alpha = 0.3, color = "black") +                 
+  geom_smooth(method = "loess", color = "orange") +          
+  labs(
+    title = "Number of Turns vs. Rating Difference",        
+    x = "Elo Difference",                                   
+    y = "Number of Turns"                                   
+  ) +
+  theme_minimal()                                          
+
+```
+
+### Most Common Openings
+
+```{r}
+# Counts how many times each opening appears in the dataset
+df %>%
+  count(opening_name) %>% 
+
+  # Selects the top 10 most frequent openings
+  top_n(10, n) %>%
+
+  ggplot(aes(x = reorder(opening_name, n),  # Reorders openings by frequency
+             y = n,                         
+             fill = opening_name)) +        
+  
+  # Creates horizontal bars
+  geom_bar(stat = "identity") +
+
+  # Flips coordinates to make it a horizontal bar plot
+  coord_flip() +
+
+  labs(title = "Top 10 Most Used Chess Openings",
+       x = "Opening",
+       y = "Game Count") +
+
+  theme_minimal() +
+
+  guides(fill = "none")
+
+```
+
+## Modeling Plans and Strategy
+
+### 1. Logistic Regression
+
+We will use logistic regression to predict the **probability of white or black winning**. This model will use: the rating differences and turn count.
+This model will help us quantify how starting and rating influence win probability.
+
+
+```{r}
+library(tidyverse)
+
+games <- read_csv("games.csv")
+
+# Keeps games with clear winner
+games <- games %>%
+  filter(winner %in% c("white", "black"))
+
+# Creates a binary outcome variable: 1 = white wins, 0 = black wins
+games <- games %>%
+  mutate(white_win = if_else(winner == "white", 1, 0))
+
+# Creating new variables rating_diff and total_rating
+games <- games %>%
+  mutate(
+    rating_diff = white_rating - black_rating,
+    total_rating = white_rating + black_rating
+  )
+
+# logistic regression model
+model <- glm(white_win ~ rating_diff + total_rating + turns, 
+             data = games, 
+             family = binomial)
+
+summary(model)
+
+# probability that white wins for each game
+games <- games %>%
+  mutate(predicted_prob_white_win = predict(model, type = "response"))
+
+# viewing a few predictions
+games %>%
+  select(white_rating, black_rating, turns, predicted_prob_white_win) %>%
+  head(10)
+
+```
+### Key Coefficients Summary
+
+1. **rating_diff**  
+   - Highly significant (p < 2e-16)  
+   - Positive coefficient: As white's rating increases relative to black’s, the probability of white winning increases substantially.  
+
+2. **turns**  
+   - Statistically significant (p < 0.00001)  
+   - Negative coefficient: More turns are slightly associated with a lower chance of white winning. This might suggest that longer games favor black or indicate drawn-out losses for white.
+
+3. **total_rating**  
+   - Not statistically significant (p ≈ 0.32)  
+   - Near-zero effect: The combined rating of both players doesn't meaningfully affect white’s odds of winning once rating_diff is accounted for.
+
+
+### 2. Classification Tree
+
+We will fit a classification tree to predict who wins a game, using: - `white_rating`, `black_rating`, `opening_name`, and `elo_bracket`
+
+This tree will help us visualize how player skill and opening choice interact. It might show, for example, that some openings work better at high ratings, while others are more forgiving for beginners.
+
+```{r}
+library(rpart)
+library(rpart.plot)
+
+# Filters for decisive games only
+df_tree <- df %>%
+  filter(winner %in% c("white", "black")) %>%
+  mutate(winner_binary = factor(winner))
+
+# Groups the openings
+opening_freqs <- df_tree %>%
+  count(opening_name, sort = TRUE)
+
+top_openings <- opening_freqs %>%
+  slice_max(n, n = 20) %>%
+  pull(opening_name)
+
+df_tree <- df_tree %>%
+  mutate(opening_grouped = ifelse(opening_name %in% top_openings, opening_name, "Other"))
+
+# Fitting the classification tree
+chess_tree <- rpart(winner_binary ~ white_rating + black_rating + opening_grouped + increment_code,
+                    data = df_tree, method = "class", cp = 0.01)
+
+# Plotting the tree
+rpart.plot(chess_tree, type = 2, extra = 104, fallen.leaves = TRUE,
+           main = "Classification Tree: Predicting Winner")
+```
+
+The classification tree gives us a very interesting look at how player ratings interact to predict who wins a chess game. The first split happens at a black rating of 1345—if Black is rated lower than that, White wins 66% of the time. But once Black crosses that threshold, things get more complicated and player skill really starts to drive the outcome of the match.
+
+For example, if White’s rating is below 1419, the model predicts a Black win in most cases—especially if White is also below 1200 or so (nodes with 69–70% win rates for Black). On the other hand, when both players are in the higher Elo range (Black above 2068 and White above 1846), White has a slight edge with a 59% win rate. That’s actually a bit surprising—we might expect higher-rated Black players to dominate here, but it looks like White's first-move advantage starts to matter again once both players are strong.
+
+Overall, the tree confirms that skill differences are the main component in winning, but it also shows that White’s advantage isn’t constant, as it really depends on where both players fall in the rating distribution. It also suggests that once Black hits a certain level, White has to work harder to secure a win.
+
+### 3. Regression Tree for Game Length
+
+Here, our goal is to predict how long a game will last (in number of turns). We’ll use: `rating_diff`, `opening_name`, `increment_code`, and `elo_bracket`
+
+This will help us understand whether faster games are driven by mismatches or particular opening styles.
+
+```{r}
+df_reg <- df %>%
+  mutate(
+    # Only keeps games with a valid turn count
+    turns = as.numeric(turns),
+    
+    # Cleaning increment_code and opening_name
+    increment_code = as.factor(increment_code),
+    
+    # Grouping together rare openings
+    opening_grouped = ifelse(opening_name %in% top_openings, opening_name, "Other")
+  )
+
+top_time_controls <- df_reg %>%
+  count(increment_code, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  pull(increment_code)
+
+df_reg <- df_reg %>%
+  mutate(increment_code = ifelse(increment_code %in% top_time_controls, increment_code, "Other")) %>%
+  mutate(increment_code = factor(increment_code))  # Ensure it's still a factor
+
+# Fitting regression tree again
+game_length_tree <- rpart(turns ~ rating_diff + opening_grouped + increment_code,
+                          data = df_reg, method = "anova", cp = 0.01)
+
+# Plotting the regression tree
+rpart.plot(game_length_tree, type = 2, extra = 101, fallen.leaves = TRUE,
+           main = "Regression Tree: Predicting Game Length")
+
+
+```
+
+The regression tree gives us a digestible takeaway: the biggest driver of how long a chess game lasts is the **rating difference between the two players**. The tree splits right at a `rating_diff` of 287. When the skill gap is bigger than that, games tend to be much shorter—averaging around **53 moves**. On the other hand, when players are more evenly matched (rating difference under 287), the games stretch out to around **62 moves** on average.
+
+This makes intuitive sense. If one player significantly outranks the other, the game probably ends quickly—either by domination or early blunders. But when both players are on similar footing, the game tends to be more competitive, longer, and maybe even more strategic.
+
+It’s interesting that none of the opening choices or time controls showed up in the tree—at least not as important enough to split on first. That suggests **player mismatch alone** might be a stronger predictor of game length than the specific strategy or format used.
+
+### 4. Opening Win Likelihood
+
+Using the logistic model, we’ll compute the **average predicted win probability** for each opening. This could uncover hidden gems: lesser-used openings that actually perform well in certain rating brackets.
+
+### 5. Recommender System
+
+We’ll build a simple recommender that, based on a player’s Elo bracket, suggests openings that give the best win odds. For example: - If you’re under 1200, play Van’t Krujis - If you’re 1600+, maybe try Sicilian Defense
+
+This could be implemented using filtering + model scores or a tree-based recommender.
+
+## 📄 Conclusion and Next Steps
+
+So far, we’ve confirmed that Elo rating matters and that opening choice may play a larger role than expected. The visualizations are clear and the next step is to build models that go deeper.
+
+Next steps: - Fit and interpret logistic regression for opening win likelihood, building a recommender system from the model predictions, and using cross-validation to evaluate the accuracy of our model.
+
+### Discussion
+
+**Is the answer to the research question summarized and supported by evidence?**
+
+Yes. The report clearly states its central research question: "what makes a player more likely to win a chess game?" and supports its conclusions with both exploratory plots and predictive modeling. The logistic regression model quantifies the impact of rating difference and turn count on win probability. Furthermore, classification and regression trees explore non-linear interactions between player skill, opening choices, and game duration. Visualizations such as win distributions by Elo gap and game length provide strong empirical grounding, and interpretations are directly tied back to observed results (e.g., longer games when players are evenly matched).
+
+
+**Are limitations of the analysis clearly outlined?**
+
+Yes. Several limitations are considered, both directly and through the design of the analysis. For instance, the dataset exclusively consists of online games, which introduces potential biases compared to over-the-board play, including higher variance in skill expression, faster time controls, and more frequent blunders. Additionally, although opening choice is explored, its effect was limited in predictive models—suggesting that further interaction terms (e.g., opening × rating bracket) could be required to fully capture its impact. The logistic regression model also assumes linearity in the logit, which may not fully reflect how subtle shifts in skill affect win probability in extreme rating tiers. Lastly, draw outcomes are excluded from the modeling framework, which limits the analysis to decisive games and may understate patterns that influence balanced or drawn matches.
+
+Do the authors reflect on any implications the nature of the training data has for the generalizability of the findings?
+
+Yes. The analysis implicitly acknowledges that the data represents online chess played on a specific platform, which is not necessarily reflective of classical time formats or elite tournament play. The dominance of fast-paced games, the relatively casual rating brackets (many players clustered between 1200–1800), and the platform-specific user base mean that conclusions about rating disparities or effective openings may not apply to top-level play or across all chess demographics. However, by grouping openings and time controls and limiting scope to decisive games, our report maintains internal consistency and validity within the dataset's context. Future work could validate the findings across additional datasets or platforms to test for consistency.
+
+Do the authors reflect on the ethicality of their work?
+
+Yes. While the dataset consists of publicly available, anonymized game records, the report acknowledges the importance of respecting user privacy and ensuring responsible modeling practices. No player-identifying features (e.g., usernames) are used in modeling or visualization. Our work focuses solely on in-game features like ratings, moves, and structural characteristics. Furthermore, the analysis avoids using the data for player ranking or performance labeling, mitigating potential harm. If extended into recommendation systems, ethical safeguards—such as fairness across skill levels and time controls—would be implemented to avoid privileging already-strong players or reinforcing selection bias in popular openings.
