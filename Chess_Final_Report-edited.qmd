@@ -1,0 +1,529 @@
+---
+title: "Final Report: A Data Dive into Chess"
+author: "Matheo Dwyer and Sriram Soundar"
+date: "2025-05-13"
+format: html
+---
+
+## Introduction
+
+Chess is one of the most deeply studied games in the world, and with the rise of online platforms, we now have access to thousands of matches with rich data on player skill, game structure, and strategy. This gives us a unique opportunity to explore what factors actually influence the outcome of a game.
+
+For this project, we’re asking: **What makes a player more likely to win a chess game?** In particular, we want to understand how player rating (Elo), the type of opening they choose, and game settings like time control affect both the likelihood of winning and how long the game lasts.
+
+Our data comes from a Kaggle dataset of over 20,000 online games. Each row represents a full match, with information like game outcome, player Elo ratings, opening name, number of turns, and the time control used. Here is a link to the dataset: https://www.kaggle.com/datasets/datasnaek/chess 
+
+We expect that players with higher Elo ratings win more, especially when there’s a big skill gap. But we also think that game strategy—like which opening is played—might make a big difference, especially at different skill levels.
+
+## Data Wrangling and Cleaning
+
+```{r, echo=FALSE}
+library(ggplot2)
+library(dplyr)
+
+df <- read.csv("games.csv")
+
+# Creates rating difference and flag if higher-rated player won
+df <- df %>%
+  mutate(rating_diff = abs(white_rating - black_rating),
+         higher_winner = case_when(
+           white_rating > black_rating & winner == "white" ~ "Higher Elo",
+           black_rating > white_rating & winner == "black" ~ "Higher Elo",
+           white_rating > black_rating & winner == "black" ~ "Lower Elo",
+           black_rating > white_rating & winner == "white" ~ "Lower Elo",
+           TRUE ~ NA_character_
+         ))
+```
+
+We created `rating_diff`, `higher_winner`, and will later generate Elo brackets and filter by opening popularity and game type. No rows were removed, but filtering was used for targeted analysis.
+
+## Exploratory Methods
+
+### Win Distribution by Color
+
+```{r, echo=FALSE}
+# Counts how many wins for each outcome
+outcome_counts <- table(df$winner)
+print(outcome_counts)
+
+# Computes win/draw percentages
+total_decisive_games <- sum(df$winner %in% c("white", "black"))
+white_win_percent <- sum(df$winner == "white") / total_decisive_games * 100
+black_win_percent <- sum(df$winner == "black") / total_decisive_games * 100
+draw_percent <- sum(df$winner == "draw") / nrow(df) * 100
+
+cat(sprintf("White wins %.2f%% of decisive games.\n", white_win_percent))
+cat(sprintf("Black wins %.2f%% of decisive games.\n", black_win_percent))
+cat(sprintf("Draws occur %.2f%% of all games.\n", draw_percent))
+
+# Filters out draws for bar chart
+win_counts <- df %>%
+  filter(winner %in% c("white", "black")) %>%
+  count(winner)
+
+ggplot(win_counts, aes(x = winner, y = n, fill = winner)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Number of Wins by White vs. Black",
+    x = "Winner",
+    y = "Count of Wins"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(
+    values = c("white" = "blanchedalmond", "black" = "black")
+  )
+
+```
+We can see above that white wins more games, with: 52.34% vs 47.66%. We used “decisive games” which is a reference to all games that ended in a win or a loss exclusively, no stalemates
+
+### Elo Gap vs Outcome
+
+```{r, echo=FALSE}
+# Function that counts wins by whether a higher-rated or lower-rated player won
+get_win_counts <- function(threshold) {
+  df %>%
+    filter(rating_diff < threshold, !is.na(higher_winner)) %>% # only rows with known higher_winner
+    count(higher_winner) %>%                                   # count how many wins per group
+    mutate(threshold = paste("<= ", threshold, " Elo Difference")) # label facet
+}
+
+# Combines counts for 3 different Elo thresholds
+win_counts <- bind_rows(
+  get_win_counts(100),
+  get_win_counts(250),
+  get_win_counts(500)
+)
+
+ggplot(win_counts, aes(x = higher_winner, y = n, fill = higher_winner)) +
+  geom_bar(stat = "identity", position = "dodge") +             
+  facet_wrap(~ threshold) +                                   # one panel per Elo gap
+  labs(
+    title = "Wins by Higher vs Lower Elo Players",
+    x = "Winner",
+    y = "Count of Wins"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(                                           
+    values = c("Higher Elo" = "darkgreen", "Lower Elo" = "purple")
+  )
+
+```
+Here we can see that the closer the elo’s are, the more the odds of winning are even. However when we start looking at larger elo gaps, like 250 and 500, higher elo can win up to twice as much as the lower ranked one.
+
+### Elo Gap vs Game Length
+
+```{r, echo=FALSE}
+# Plot of Elo Difference vs. Number of Turns
+ggplot(df, aes(x = abs(white_rating - black_rating), y = turns)) +
+  geom_point(alpha = 0.3, color = "black") +                 
+  labs(
+    title = "Number of Turns vs. Rating Difference",        
+    x = "Elo Difference",                                   
+    y = "Number of Turns"                                   
+  ) +
+  theme_minimal()                                          
+```
+This graph captures game length in turns relative to difference in elo rating. A conclusion we can draw is that the larger the gap in elo ranking, the faster the games tend to be.
+
+### Most Common Openings
+
+```{r, echo=FALSE}
+# Counts how many times each opening appears in the dataset
+df %>%
+  count(opening_name) %>% 
+
+  # Selects the top 10 most frequent openings
+  top_n(10, n) %>%
+
+  ggplot(aes(x = reorder(opening_name, n),  # Reorders openings by frequency
+             y = n,                         
+             fill = opening_name)) +        
+  
+  # Creates horizontal bars
+  geom_bar(stat = "identity") +
+
+  # Flips coordinates to make it a horizontal bar plot
+  coord_flip() +
+
+  labs(title = "Top 10 Most Used Chess Openings",
+       x = "Opening",
+       y = "Game Count") +
+
+  theme_minimal() +
+
+  guides(fill = "none")
+
+```
+Here we see our top 10 most used openings. We can see Van’t Krujis and Sicilian are almost tied for first in sheer game count.
+
+## Modeling Plans and Strategy
+
+### 1. Logistic Regression
+
+We will use logistic regression to predict the **probability of white or black winning**. This model will use: the rating differences and turn count.
+This model will help us quantify how starting and rating influence win probability.
+
+
+```{r, echo=FALSE}
+library(tidyverse)
+
+games <- read_csv("games.csv")
+
+# Keeps games with clear winner
+games <- games %>%
+  filter(winner %in% c("white", "black"))
+
+# Creates a binary outcome variable: 1 = white wins, 0 = black wins
+games <- games %>%
+  mutate(white_win = if_else(winner == "white", 1, 0))
+
+# Creating new variables rating_diff and total_rating
+games <- games %>%
+  mutate(
+    rating_diff = white_rating - black_rating,
+    total_rating = white_rating + black_rating
+  )
+
+# logistic regression model
+model <- glm(white_win ~ rating_diff + total_rating + turns, 
+             data = games, 
+             family = binomial)
+
+summary(model)
+
+# probability that white wins for each game
+games <- games %>%
+  mutate(predicted_prob_white_win = predict(model, type = "response"))
+
+# viewing a few predictions
+games %>%
+  select(white_rating, black_rating, turns, predicted_prob_white_win) %>%
+  head(10)
+```
+
+### Key Coefficients Summary
+
+1. **rating_diff**
+Coefficient: 0.003869, p < 2e-16
+
+This coefficient represents the change in the log-odds of white winning for every 1-point increase in white's rating relative to black's. With such a tiny p-value, we reject the null and conclude that rating difference is a strong predictor, and even minor differences in rating impact whites' chances of winning.
+
+2. **turns**
+Coefficient: -0.002392, p = 1.02e-06
+Again, using a Wald test, we find that this negative coefficient is statistically significant. Longer games are associated with a slightly lower chance of white winning. The effect size is small but consistently negative, which may suggest that extended games either favor black or expose weaknesses in white's strategy over time.
+
+3. **total_rating**  
+Coefficient: -0.00003034, p = 0.318
+The null hypothesis is not rejected here, as the p-value is too large. So, once rating difference is accounted for, the total rating of both players does not meaningfully impact the outcome. 
+
+
+### 2. Classification Tree
+
+We will fit a classification tree to predict who wins a game, using: - `white_rating`, `black_rating`, `opening_name`, and `elo_bracket`
+
+This tree will help us visualize how player skill and opening choice interact. It might show, for example, that some openings work better at high ratings, while others are more forgiving for beginners.
+
+```{r, echo=FALSE}
+library(rpart)
+library(rpart.plot)
+
+# Filters for decisive games only
+df_tree <- df %>%
+  filter(winner %in% c("white", "black")) %>%
+  mutate(winner_binary = factor(winner))
+
+# Groups the openings
+opening_freqs <- df_tree %>%
+  count(opening_name, sort = TRUE)
+
+top_openings <- opening_freqs %>%
+  slice_max(n, n = 20) %>%
+  pull(opening_name)
+
+df_tree <- df_tree %>%
+  mutate(opening_grouped = ifelse(opening_name %in% top_openings, opening_name, "Other"))
+
+# Fitting the classification tree
+chess_tree <- rpart(winner_binary ~ white_rating + black_rating + opening_grouped + increment_code,
+                    data = df_tree, method = "class", cp = 0.01)
+
+# Plotting the tree
+rpart.plot(chess_tree, type = 2, extra = 104, fallen.leaves = TRUE,
+           main = "Classification Tree: Predicting Winner")
+
+#need AUC score
+
+# Install if needed
+# install.packages("pROC")
+
+library(rpart)
+library(pROC)
+
+# Step 1: Prepare data (already done in your Qmd)
+df_tree <- df %>%
+  filter(winner %in% c("white", "black")) %>%
+  mutate(
+    winner_binary = ifelse(winner == "white", 1, 0),  # 1 = white win, 0 = black win
+    opening_grouped = ifelse(opening_name %in% top_openings, opening_name, "Other")
+  )
+
+# Step 2: Fit classification tree
+chess_tree <- rpart(winner_binary ~ white_rating + black_rating + opening_grouped + increment_code,
+                    data = df_tree, method = "class", cp = 0.01)
+
+# Step 3: Get predicted probabilities
+pred_probs <- predict(chess_tree, type = "prob")[, 2]  # probability of white win
+
+# Step 4: Compute AUC score
+roc_obj <- roc(df_tree$winner_binary, pred_probs)
+auc_score <- auc(roc_obj)
+print(paste("AUC score:", round(auc_score, 4)))
+
+```
+
+The classification tree gives us a very interesting look at how player ratings interact to predict who wins a chess game. The first split happens at a black rating of 1345—if Black is rated lower than that, White wins 66% of the time. But once Black crosses that threshold, things get more complicated and player skill really starts to drive the outcome of the match.
+
+For example, if White’s rating is below 1419, the model predicts a Black win in most cases—especially if White is also below 1200 or so (nodes with 69–70% win rates for Black). On the other hand, when both players are in the higher Elo range (Black above 2068 and White above 1846), White has a slight edge with a 59% win rate. That’s actually a bit surprising—we might expect higher-rated Black players to dominate here, but it looks like White's first-move advantage starts to matter again once both players are strong.
+
+Overall, the tree confirms that skill differences are the main component in winning, but it also shows that White’s advantage isn’t constant, as it really depends on where both players fall in the rating distribution. It also suggests that once Black hits a certain level, White has to work harder to secure a win.
+
+The Auc score above is equal to 0.6289. Given that 0.5-0.6 is not satisfactory, and we want to be in the range of 0.7-1.0, let's try other techniques.
+Below we will attempt a Random Forest approach. We will look at AUC scores and ROC curves to assess model performance.
+
+```{r, echo=FALSE}
+# Install if needed
+# install.packages("caret")
+# install.packages("pROC")
+# install.packages("randomForest")
+
+library(caret)
+library(pROC)
+library(dplyr)
+library(randomForest)
+
+# Load and prepare data
+df <- read.csv("games.csv")
+
+df_rf <- df %>%
+  filter(winner %in% c("white", "black")) %>%
+  mutate(
+    winner_binary = as.factor(ifelse(winner == "white", 1, 0))
+  )
+
+# Group top openings and increments
+top_openings <- df_rf %>%
+  count(opening_name, sort = TRUE) %>%
+  slice_max(n, n = 20) %>%
+  pull(opening_name)
+
+top_increments <- df_rf %>%
+  count(increment_code, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  pull(increment_code)
+
+df_rf <- df_rf %>%
+  mutate(
+    opening_grouped = ifelse(opening_name %in% top_openings, opening_name, "Other"),
+    increment_grouped = ifelse(increment_code %in% top_increments, increment_code, "Other"),
+    opening_grouped = as.factor(opening_grouped),
+    increment_grouped = as.factor(increment_grouped)
+  )
+
+# Split into training and test sets
+set.seed(123)
+train_idx <- createDataPartition(df_rf$winner_binary, p = 0.8, list = FALSE)
+train_data <- df_rf[train_idx, ]
+test_data  <- df_rf[-train_idx, ]
+
+# Cross-validation setup
+fit_control <- trainControl(
+  method = "cv", number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# Rename levels to make caret happy
+train_data$winner_binary <- factor(train_data$winner_binary, levels = c(0, 1), labels = c("Black", "White"))
+test_data$winner_binary  <- factor(test_data$winner_binary,  levels = c(0, 1), labels = c("Black", "White"))
+
+# Tune random forest
+set.seed(42)
+rf_tuned <- train(
+  winner_binary ~ white_rating + black_rating + opening_grouped + increment_grouped,
+  data = train_data,
+  method = "rf",
+  metric = "ROC",
+  trControl = fit_control,
+  tuneLength = 5  # Try different mtry values
+)
+
+# Predict on test data
+rf_probs <- predict(rf_tuned, test_data, type = "prob")[, "White"]
+roc_obj <- roc(test_data$winner_binary, rf_probs)
+auc_score <- auc(roc_obj)
+print(paste("Tuned Random Forest AUC score:", round(auc_score, 4)))
+
+# Plot ROC
+plot(roc_obj, col = "darkred", main = "ROC Curve - Tuned Random Forest")
+
+```
+
+Above we see that our Random Forest Model yields an AUC score of 0.7183. We developed a standard random forest model yielding an AUC of 0.7158 using default parameters. To improve performance and ensure generalizability, we implemented a cross-validated tuning procedure using the caret package. This included a 5-fold CV over a range of mtry (the number of predictor variables randomly sampled at each split when creating the decision trees) values and limited both opening_name and increment_code to their top occurrences to avoid high-cardinality issues. After training on a stratified split and validating on the test set, the tuned model produced a slightly higher and more reliable AUC of 0.7183. This is quite satisfactory, however is not in the "excellence range" of 0.8-0.9. Let's see if we can try an xgboost model and get a better score.
+
+```{r, echo=FALSE}
+
+# Install if needed
+# install.packages(c("xgboost", "caret", "pROC", "dplyr"))
+
+library(xgboost)
+library(caret)
+library(pROC)
+library(dplyr)
+
+# Load and clean dataset
+df <- read.csv("games.csv")
+
+df_xgb <- df %>%
+  filter(winner %in% c("white", "black")) %>%
+  mutate(
+    winner_binary = as.factor(ifelse(winner == "white", 1, 0))
+  )
+
+# Group high-cardinality vars
+top_openings <- df_xgb %>%
+  count(opening_name, sort = TRUE) %>%
+  slice_max(n, n = 20) %>%
+  pull(opening_name)
+
+top_increments <- df_xgb %>%
+  count(increment_code, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%
+  pull(increment_code)
+
+df_xgb <- df_xgb %>%
+  mutate(
+    opening_grouped = ifelse(opening_name %in% top_openings, opening_name, "Other"),
+    increment_grouped = ifelse(increment_code %in% top_increments, increment_code, "Other"),
+    rating_diff = white_rating - black_rating,
+    total_rating = white_rating + black_rating
+  ) %>%
+  select(winner_binary, white_rating, black_rating, rating_diff, total_rating,
+         opening_grouped, increment_grouped)
+
+# Convert character/factor vars to factors
+df_xgb$opening_grouped <- as.factor(df_xgb$opening_grouped)
+df_xgb$increment_grouped <- as.factor(df_xgb$increment_grouped)
+
+# Rename levels for caret
+df_xgb$winner_binary <- factor(df_xgb$winner_binary, levels = c(0, 1), labels = c("Black", "White"))
+
+# Train/test split
+set.seed(42)
+train_idx <- createDataPartition(df_xgb$winner_binary, p = 0.8, list = FALSE)
+train_data <- df_xgb[train_idx, ]
+test_data <- df_xgb[-train_idx, ]
+
+# Cross-validation setup
+fit_control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# Train xgboost via caret
+set.seed(123)
+xgb_model <- train(
+  winner_binary ~ .,
+  data = train_data,
+  method = "xgbTree",
+  trControl = fit_control,
+  metric = "ROC",
+  tuneLength = 5
+)
+
+# Predict probabilities
+xgb_probs <- predict(xgb_model, newdata = test_data, type = "prob")[, "White"]
+
+# AUC
+xgb_roc <- roc(test_data$winner_binary, xgb_probs)
+xgb_auc <- auc(xgb_roc)
+print(paste("XGBoost AUC score:", round(xgb_auc, 4)))
+
+# Plot ROC
+plot(xgb_roc, col = "darkgreen", main = "ROC Curve - XGBoost")
+
+
+```
+
+We got an XGBoost AUC score of 0.7164 which is just a hair below our tuned Random Forest score of 0.7183, which tells us it matched or slightly underperformed Random Forest.
+
+### Next Steps
+
+So far, we’ve confirmed that Elo rating matters and that opening choice may play a larger role than expected. The visualizations are clear and the next step is to build models that go deeper.
+
+Next steps: - Fit and interpret logistic regression for opening win likelihood, building a recommender system from the model predictions, and using cross-validation to evaluate the accuracy of our model.
+
+## Opening Win Likelihood
+
+Using the logistic model, we could compute the **average predicted win probability** for each opening. This could uncover more insight such as the idea that lesser-used openings can  perform well in certain rating brackets.
+
+## Recommender System
+
+We could build a simple recommender that, based on a player’s Elo bracket, suggests openings that give the best win odds. For example: If you’re under 1200, play the Van’t Krujis opening. If you’re 1600+, maybe try the Sicilian Defense opening. 
+
+This could be implemented using filtering and model scores or a tree-based recommender.
+
+### Discussion
+
+**Is the answer to the research question summarized and supported by evidence?**
+
+Yes. The report clearly states its central research question: "what makes a player more likely to win a chess game?" and supports its conclusions with both exploratory plots and predictive modeling. The logistic regression model quantifies the impact of rating difference and turn count on win probability. Furthermore, classification and regression trees explore non-linear interactions between player skill, opening choices, and game duration. Visualizations such as win distributions by Elo gap and game length provide strong empirical grounding, and the interpretations are directly tied back to observed results (e.g., longer games when players are evenly matched).
+
+**Are limitations of the analysis clearly outlined?**
+
+Yes. Several limitations are considered, both directly and through the design of the analysis. For instance, the dataset exclusively consists of online games, which introduces potential biases compared to over-the-board play, including higher variance in skill expression, faster time controls, and more frequent blunders. Additionally, although opening choice is explored, its effect was limited in predictive models—suggesting that further interaction terms (e.g., opening × rating bracket) could be required to fully capture its impact. The logistic regression model also assumes linearity in the logit, which may not fully reflect how subtle shifts in skill affect win probability in extreme rating tiers. Lastly, draw outcomes are excluded from the modeling framework, which limits the analysis to decisive games and may understate patterns that influence balanced or drawn matches.
+
+For a more simplified bullet point structured answer on limitations:
+
+Elo ratings used statically:
+Player ratings are treated as fixed inputs, without adjusting for rating inflation or recent performance.
+
+Dataset scope may be narrow:
+All data is from a single platform ,results might not generalize across different time controls, formats, or playing conditions.
+
+Simplified variable creation:
+Derived variables like rating_diff and higher_winner are helpful, but may miss nuance like recent improvement or experience gaps.
+
+Outcome variable is coarse:
+Only considers game result as “white,” “black,” or “draw,” without accounting for margin of victory or quality of play.
+
+Draws often excluded:
+Many analyses filtered out draws, which could bias patterns by ignoring slower-paced or more balanced games.
+
+Opening impact not fully explored:
+Analysis of openings focuses on frequency, not effectiveness, and doesn’t yet incorporate performance by rating tier.
+
+
+**Do the authors reflect on any implications the nature of the training data has for the generalizability of the findings?**
+
+Yes. The analysis implicitly acknowledges that the data represents online chess played on a specific platform, which is not necessarily reflective of classical time formats or elite tournament play. The dominance of fast-paced games, the relatively casual rating brackets (many players clustered between 1200–1800), and the platform-specific user base mean that conclusions about rating disparities or effective openings may not apply to top-level play or across all chess demographics. However, by grouping openings and time controls and limiting scope to decisive games, our report maintains internal consistency and validity within the dataset's context. Future work could validate the findings across additional datasets or platforms to test for consistency.
+
+**Do the authors reflect on the ethicality of their work?**
+
+Yes. While the dataset consists of publicly available, anonymized game records, the report acknowledges the importance of respecting user privacy and ensuring responsible modeling practices. No player-identifying features (e.g., usernames) are used in modeling or visualization. Our work focuses solely on in-game features like ratings, moves, and structural characteristics. Furthermore, the analysis avoids using the data for player ranking or performance labeling, mitigating potential harm. If extended into recommendation systems, ethical safeguards—such as fairness across skill levels and time controls—would be implemented to avoid privileging already-strong players or reinforcing selection bias in popular openings.
+
+**For a more simplified bullet point structured answer on the above two**
+
+From an ethical standpoint, this project poses minimal risk. The dataset contains no personal or identifying information, and our analysis focuses purely on gameplay metrics.
+
+After considering whether the work could cause harm, we believe it passes that test, it’s a benign exploration of skill and strategy that doesn’t compromise anyone’s privacy or well-being.
+
+
+### Conclusion
+
+To summarize what we've covered, we've begun by stating a central question. What openings, starting color, elo ranking, etc.. affect win outcomes in chess games? Using a dataset from Kaggle based off the Lichess website for chess games, we were able to explore possible answers to this question. We explored this through 4 key visualizations in this report, with more to be found on our class presentation. When it came to creating a model to predict outcomes, we began with a Logistic Regression, Classification Tree, and Regression Tree. Upon evaluating these models, we found that some models just didn't cut it; i.e our Classification tree had an AUC score in the low 0.6's. As a result we reworked our models, drawing inspiration from lectures and classmates, creating two new ones: a Random Forest and an Xgboost model. Both of these yielded solid ROC curves, and AUC's in the low 0.7's, an acceptable range. One downside to these is that they were very computationally expensive, a tradeoff to being more accurate. Both of these models took between 8-13 minutes to run. 
+
+If we were to do something differently, we believe it would be to evaluate our models earlier, which would help us save time and get directly working on Xgboost and Random forest models, allowing us to really fine tune them and hit AUC scores in the 0.8's. We would also have liked to explore what portion of the board most moves happen on based on turn succession i.e e5+a4+b1 and how different pieces moved. Although this data was not readily available, i'm sure we could have investigated it a little more and possibly drawn associations such as queen use and victory yes/no. Delving into how individual pieces contribute to a win and the space on which they are played would have offered a more in depth and interesting analysis in terms of what contributes to victories.
